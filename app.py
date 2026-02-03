@@ -5,90 +5,122 @@ import pandas_ta as ta
 import plotly.graph_objects as go
 import google.generativeai as genai
 from datetime import datetime
+from streamlit_autorefresh import st_autorefresh
 
-# --- SETUP ---
-st.set_page_config(page_title="Pro-Signal AI", layout="wide")
+# --- 1. SETUP & REFRESH ---
+st.set_page_config(page_title="Gemini AI Scalper", layout="wide")
 
-# 1. Gemini Config (Make sure your key is in Streamlit Secrets)
+# Automatically refreshes the app every 60 seconds
+refresh_count = st_autorefresh(interval=60 * 1000, key="trading_timer")
+
+# --- 2. AI CONFIG (404 FIX) ---
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+    # Using 'gemini-1.5-flash' (most stable name)
     model = genai.GenerativeModel('gemini-1.5-flash')
 except:
-    st.error("API Key Missing! Add 'GEMINI_API_KEY' to Streamlit Secrets.")
+    st.error("Missing GEMINI_API_KEY in Streamlit Secrets!")
 
-# --- SIDEBAR: ASSET SELECTION ---
-st.sidebar.title("💹 Multi-Platform Signals")
-category = st.sidebar.selectbox("Market Type", ["Forex Majors", "Forex Minors", "Crypto/Gold"])
+# --- 3. SESSION STATE (MEMORY FIX) ---
+# This prevents the app from resetting your pair and time on refresh
+if 'pair' not in st.session_state:
+    st.session_state.pair = "EUR/USD"
+if 'tf' not in st.session_state:
+    st.session_state.tf = "5m"
 
-pairs = {
-    "Forex Majors": {"EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X", "USD/JPY": "USDJPY=X", "AUD/USD": "AUDUSD=X"},
-    "Forex Minors": {"EUR/GBP": "EURGBP=X", "GBP/JPY": "GBPJPY=X", "USD/ZAR": "USDZAR=X"},
-    "Crypto/Gold": {"Gold": "GC=F", "Bitcoin": "BTC-USD"}
+# --- 4. SIDEBAR CONTROLS ---
+st.sidebar.title("🎮 Dashboard Controls")
+st.sidebar.write(f"🔄 Refresh Count: {refresh_count}")
+st.sidebar.caption(f"Last Sync: {datetime.now().strftime('%H:%M:%S')}")
+
+pairs_dict = {
+    "EUR/USD": "EURUSD=X",
+    "GBP/USD": "GBPUSD=X",
+    "USD/JPY": "USDJPY=X",
+    "Gold (XAU)": "GC=F",
+    "Bitcoin": "BTC-USD"
 }
 
-selected_label = st.sidebar.selectbox("Select Asset", list(pairs[category].keys()))
-ticker = pairs[category][selected_label]
-timeframe = st.sidebar.selectbox("Pocket Option Expiry / MT4 Chart", ["1m", "5m", "15m"])
+# Selectbox updates the session state directly
+selected_label = st.sidebar.selectbox(
+    "Asset", 
+    list(pairs_dict.keys()), 
+    index=list(pairs_dict.keys()).index(st.session_state.pair),
+    key="pair_selector"
+)
+st.session_state.pair = selected_label
 
-# --- ENGINE ---
-def get_pro_analysis(symbol, tf):
-    # Fetch data (1m interval for scalping)
+timeframe = st.sidebar.selectbox(
+    "Timeframe", 
+    ["1m", "5m", "15m", "1h"], 
+    index=["1m", "5m", "15m", "1h"].index(st.session_state.tf),
+    key="tf_selector"
+)
+st.session_state.tf = timeframe
+
+ticker = pairs_dict[selected_label]
+
+# --- 5. DATA & INDICATORS ---
+def get_analysis_data(symbol, tf):
     df = yf.download(symbol, period="1d", interval=tf)
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
     
-    # Fast RSI for Pocket Option (7 instead of 14)
-    df['RSI'] = ta.rsi(df['Close'], length=7)
-    df['EMA_20'] = ta.ema(df['Close'], length=20)
+    # RSI (Momentum)
+    df['RSI'] = ta.rsi(df['Close'], length=14)
+    # ADX (Trend Strength)
+    adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+    df['ADX'] = adx_df['ADX_14']
+    # EMA (Trend Direction)
+    df['EMA20'] = ta.ema(df['Close'], length=20)
     
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    
-    # Technical Signal
-    signal = "NEUTRAL"
-    if last['RSI'] < 30: signal = "BUY (OVERSOLD)"
-    elif last['RSI'] > 70: signal = "SELL (OVERBOUGHT)"
-    
-    return df, last, signal
+    return df
 
-# --- UI & AI EXECUTION ---
-if st.sidebar.button("🚀 GENERATE PRO SIGNAL"):
-    df, last_data, tech_signal = get_pro_analysis(ticker, timeframe)
-    
-    # 2. THE FULL GEMINI PRO PROMPT
-    recent_history = df.tail(10).to_string() # Giving AI context of last 10 candles
-    
+# --- 6. MAIN UI ---
+df = get_analysis_data(ticker, timeframe)
+last = df.iloc[-1]
+
+# Top Metric Row
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Live Price", f"{last['Close']:.5f}")
+m2.metric("RSI (14)", f"{last['RSI']:.1f}")
+
+# Trend Strength Logic
+adx_val = last['ADX']
+strength = "Weak"
+if adx_val > 25: strength = "Strong"
+if adx_val > 50: strength = "Extreme"
+m3.metric("Trend Strength", f"{adx_val:.1f}", strength)
+
+m4.metric("EMA 20", "Above" if last['Close'] > last['EMA20'] else "Below")
+
+# Chart
+fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
+fig.update_layout(template="plotly_dark", height=450, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+st.plotly_chart(fig, use_container_width=True)
+
+# --- 7. AUTOMATED AI VERDICT ---
+st.markdown("---")
+st.subheader("🤖 AI Technical Verdict")
+
+with st.spinner("Gemini AI is analyzing patterns..."):
+    # Send recent data to AI
+    recent_data = df.tail(10).to_string()
     prompt = f"""
-    You are a Master Price Action Trader for Pocket Option and MetaTrader.
+    Act as a professional Forex Scalper.
     Asset: {selected_label} | Timeframe: {timeframe}
-    Technical Signal: {tech_signal}
-    Recent Data (OHLC):
-    {recent_history}
-
-    Your Task:
-    1. Identify the nearest Support and Resistance based on these numbers.
-    2. Look for patterns (Engulfing, Pin Bars, Doji).
-    3. Give a final verdict: "HIGH CONFIDENCE BUY", "CAUTIOUS BUY", "WAIT", or "SELL".
-    4. Limit your response to 3 clear bullet points.
+    Current Price: {last['Close']} | RSI: {last['RSI']} | ADX Strength: {adx_val}
+    
+    Recent Data:
+    {recent_data}
+    
+    Give a 3-sentence verdict:
+    1. Market Sentiment (Bullish/Bearish)
+    2. Entry Signal (Buy/Sell/Wait)
+    3. Suggested Take Profit/Stop Loss
     """
     
-    st.markdown(f"## {selected_label} Analysis")
-    
-    with st.spinner("Gemini AI is analyzing candle patterns..."):
+    try:
         response = model.generate_content(prompt)
-        ai_verdict = response.text
-
-    # Display Metrics
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Live Price", f"{last_data['Close']:.5f}")
-    c2.metric("Fast RSI (7)", f"{last_data['RSI']:.1f}")
-    c3.subheader(f"Signal: {tech_signal}")
-
-    # Plotly Chart
-    fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-    fig.update_layout(template="plotly_dark", height=400, xaxis_rangeslider_visible=False)
-    st.plotly_chart(fig, use_container_width=True)
-
-    # Display AI Verdict
-    st.info("🤖 **GEMINI PRO VERDICT**")
-    st.write(ai_verdict)
-
+        st.info(response.text)
+    except Exception as e:
+        st.error(f"AI offline: {e}")
