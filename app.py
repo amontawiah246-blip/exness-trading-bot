@@ -1,6 +1,6 @@
 import streamlit as st
 import yfinance as yf
-import pandas_ta as ta
+import pandas as pd
 import plotly.graph_objects as go
 import google.generativeai as genai
 from datetime import datetime
@@ -60,4 +60,5 @@ if st.sidebar.button("GET LIVE SIGNAL"):
         st.subheader("🤖 Gemini AI Verdict")
         prompt = f"Data: {ticker} at {price}, RSI {rsi}. Signal is {signal}. Give a 1-sentence pro trader tip."
         response = model.generate_content(prompt)
+
         st.info(response.text)
