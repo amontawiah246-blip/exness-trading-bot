@@ -10,117 +10,87 @@ from streamlit_autorefresh import st_autorefresh
 # --- 1. SETUP & REFRESH ---
 st.set_page_config(page_title="Gemini AI Scalper", layout="wide")
 
-# Automatically refreshes the app every 60 seconds
-refresh_count = st_autorefresh(interval=60 * 1000, key="trading_timer")
+# This keeps the price/chart live every 60s without triggering the AI automatically
+refresh_count = st_autorefresh(interval=60 * 1000, key="price_timer")
 
-# --- 2. AI CONFIG (404 FIX) ---
+# --- 2. AI CONNECTION CHECK ---
+# We check the API key and show a status light in the sidebar
+gemini_connected = False
 try:
-    genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    # Using 'gemini-1.5-flash' (most stable name)
-    model = genai.GenerativeModel('gemini-1.5-flash')
-except:
-    st.error("Missing GEMINI_API_KEY in Streamlit Secrets!")
+    if "GEMINI_API_KEY" in st.secrets:
+        genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        # Simple test to verify connection
+        gemini_connected = True
+    else:
+        st.sidebar.error("❌ Key Missing in Secrets")
+except Exception as e:
+    st.sidebar.error(f"❌ Connection Failed: {e}")
 
-# --- 3. SESSION STATE (MEMORY FIX) ---
-# This prevents the app from resetting your pair and time on refresh
-if 'pair' not in st.session_state:
-    st.session_state.pair = "EUR/USD"
-if 'tf' not in st.session_state:
-    st.session_state.tf = "5m"
+# --- 3. SESSION STATE (MEMORY) ---
+if 'pair' not in st.session_state: st.session_state.pair = "EUR/USD"
+if 'tf' not in st.session_state: st.session_state.tf = "5m"
+if 'ai_analysis' not in st.session_state: st.session_state.ai_analysis = "Click the button below to generate a signal."
 
-# --- 4. SIDEBAR CONTROLS ---
-st.sidebar.title("🎮 Dashboard Controls")
-st.sidebar.write(f"🔄 Refresh Count: {refresh_count}")
-st.sidebar.caption(f"Last Sync: {datetime.now().strftime('%H:%M:%S')}")
+# --- 4. SIDEBAR ---
+st.sidebar.title("🎮 Dashboard")
+
+# Status Indicator
+if gemini_connected:
+    st.sidebar.success("🟢 Gemini API: Connected")
+else:
+    st.sidebar.error("🔴 Gemini API: Disconnected")
 
 pairs_dict = {
-    "EUR/USD": "EURUSD=X",
-    "GBP/USD": "GBPUSD=X",
-    "USD/JPY": "USDJPY=X",
-    "Gold (XAU)": "GC=F",
-    "Bitcoin": "BTC-USD"
+    "EUR/USD": "EURUSD=X", "GBP/USD": "GBPUSD=X",
+    "USD/JPY": "USDJPY=X", "Gold (XAU)": "GC=F", "Bitcoin": "BTC-USD"
 }
 
-# Selectbox updates the session state directly
-selected_label = st.sidebar.selectbox(
-    "Asset", 
-    list(pairs_dict.keys()), 
-    index=list(pairs_dict.keys()).index(st.session_state.pair),
-    key="pair_selector"
-)
-st.session_state.pair = selected_label
+st.session_state.pair = st.sidebar.selectbox("Asset", list(pairs_dict.keys()), 
+    index=list(pairs_dict.keys()).index(st.session_state.pair))
 
-timeframe = st.sidebar.selectbox(
-    "Timeframe", 
-    ["1m", "5m", "15m", "1h"], 
-    index=["1m", "5m", "15m", "1h"].index(st.session_state.tf),
-    key="tf_selector"
-)
-st.session_state.tf = timeframe
+st.session_state.tf = st.sidebar.selectbox("Timeframe", ["1m", "5m", "15m", "1h"], 
+    index=["1m", "5m", "15m", "1h"].index(st.session_state.tf))
 
-ticker = pairs_dict[selected_label]
+ticker = pairs_dict[st.session_state.pair]
 
-# --- 5. DATA & INDICATORS ---
-def get_analysis_data(symbol, tf):
+# --- 5. DATA ENGINE ---
+def get_data(symbol, tf):
     df = yf.download(symbol, period="1d", interval=tf)
     if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-    
-    # RSI (Momentum)
     df['RSI'] = ta.rsi(df['Close'], length=14)
-    # ADX (Trend Strength)
-    adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-    df['ADX'] = adx_df['ADX_14']
-    # EMA (Trend Direction)
+    adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+    df['ADX'] = adx['ADX_14']
     df['EMA20'] = ta.ema(df['Close'], length=20)
-    
     return df
 
-# --- 6. MAIN UI ---
-df = get_analysis_data(ticker, timeframe)
+df = get_data(ticker, st.session_state.tf)
 last = df.iloc[-1]
 
-# Top Metric Row
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Live Price", f"{last['Close']:.5f}")
-m2.metric("RSI (14)", f"{last['RSI']:.1f}")
+# --- 6. UI LAYOUT ---
+st.title(f"Live Market: {st.session_state.pair}")
 
-# Trend Strength Logic
-adx_val = last['ADX']
-strength = "Weak"
-if adx_val > 25: strength = "Strong"
-if adx_val > 50: strength = "Extreme"
-m3.metric("Trend Strength", f"{adx_val:.1f}", strength)
+col1, col2, col3 = st.columns(3)
+col1.metric("Price", f"{last['Close']:.5f}")
+col2.metric("RSI (14)", f"{last['RSI']:.1f}")
+col3.metric("ADX Strength", f"{last['ADX']:.1f}", "Strong" if last['ADX'] > 25 else "Weak")
 
-m4.metric("EMA 20", "Above" if last['Close'] > last['EMA20'] else "Below")
-
-# Chart
 fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
-fig.update_layout(template="plotly_dark", height=450, xaxis_rangeslider_visible=False, margin=dict(l=10, r=10, t=10, b=10))
+fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
 st.plotly_chart(fig, use_container_width=True)
 
-# --- 7. AUTOMATED AI VERDICT ---
+# --- 7. MANUAL AI TRIGGER ---
 st.markdown("---")
-st.subheader("🤖 AI Technical Verdict")
+if st.button("🚀 GET AI SIGNAL NOW", use_container_width=True):
+    if gemini_connected:
+        with st.spinner("Analyzing market patterns..."):
+            prompt = f"Trader Verdict for {st.session_state.pair} ({st.session_state.tf}). Price: {last['Close']}, RSI: {last['RSI']}, ADX: {last['ADX']}. Recent: {df.tail(5).to_string()}. Give Buy/Sell/Wait and TP/SL."
+            try:
+                response = model.generate_content(prompt)
+                st.session_state.ai_analysis = response.text
+            except Exception as e:
+                st.session_state.ai_analysis = f"Error generating signal: {e}"
+    else:
+        st.error("Cannot generate signal: Gemini API is not connected.")
 
-with st.spinner("Gemini AI is analyzing patterns..."):
-    # Send recent data to AI
-    recent_data = df.tail(10).to_string()
-    prompt = f"""
-    Act as a professional Forex Scalper.
-    Asset: {selected_label} | Timeframe: {timeframe}
-    Current Price: {last['Close']} | RSI: {last['RSI']} | ADX Strength: {adx_val}
-    
-    Recent Data:
-    {recent_data}
-    
-    Give a 3-sentence verdict:
-    1. Market Sentiment (Bullish/Bearish)
-    2. Entry Signal (Buy/Sell/Wait)
-    3. Suggested Take Profit/Stop Loss
-    """
-    
-    try:
-        response = model.generate_content(prompt)
-        st.info(response.text)
-    except Exception as e:
-        st.error(f"AI offline: {e}")
+st.info(st.session_state.ai_analysis)
