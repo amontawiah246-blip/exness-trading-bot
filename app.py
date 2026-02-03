@@ -12,7 +12,7 @@ st.set_page_config(page_title="Pro-Signal AI", layout="wide")
 # 1. Gemini Config (Make sure your key is in Streamlit Secrets)
 try:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
-    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+    model = genai.GenerativeModel('gemini-1.5-flash')
 except:
     st.error("API Key Missing! Add 'GEMINI_API_KEY' to Streamlit Secrets.")
 
@@ -91,3 +91,4 @@ if st.sidebar.button("🚀 GENERATE PRO SIGNAL"):
     # Display AI Verdict
     st.info("🤖 **GEMINI PRO VERDICT**")
     st.write(ai_verdict)
+
