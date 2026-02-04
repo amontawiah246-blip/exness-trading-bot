@@ -8,87 +8,88 @@ import plotly.graph_objects as go
 from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 
-# --- 1. SETUP & REFRESH ---
-st.set_page_config(page_title="Gemini 2.0 FX Scalper", layout="wide")
-st_autorefresh(interval=60 * 1000, key="datarefresh") # Refresh price every 60s
+# --- 1. SETUP ---
+st.set_page_config(page_title="Gemini 2.0 Scalper", layout="wide")
+st_autorefresh(interval=60000, key="fxcp_refresh") # Auto-refresh UI every 60s
 
-# --- 2. API CONFIG ---
-# Using the latest Gemini 2.0 Flash model
+# --- 2. API CONFIG (Gemini 2.0 Flash) ---
 API_KEY = st.secrets["GEMINI_API_KEY"] if "GEMINI_API_KEY" in st.secrets else "YOUR_KEY_HERE"
 genai.configure(api_key=API_KEY)
 
-# --- 3. SESSION STATE ---
-if "ai_analysis" not in st.session_state:
-    st.session_state.ai_analysis = {"signal": "WAIT", "confidence": 0, "reason": "Press the button."}
+# --- 3. STATE MANAGEMENT ---
+# This ensures the signal stays on screen even after the page refreshes
+if "ai_signal" not in st.session_state:
+    st.session_state.ai_signal = None
 
-def get_ai_analysis(rsi, adx, close, ticker):
-    # Updated to Gemini 2.0 Flash
-    model = genai.GenerativeModel('gemini-2.0-flash-exp') 
-    prompt = f"""
-    Forex {ticker}: Price={close:.5f}, RSI={rsi:.2f}, ADX={adx:.2f}. 
-    Return ONLY a JSON object:
-    {{
-        "signal": "BUY",
-        "confidence": 85,
-        "reason": "short explanation"
-    }}
-    """
+def fetch_gemini_signal(rsi, adx, price, ticker):
     try:
+        model = genai.GenerativeModel('gemini-2.0-flash-exp')
+        # Using double {{ }} to fix the SyntaxError you had earlier
+        prompt = f"""
+        Act as a pro Forex Scalper. Analyze {ticker}: 
+        Price: {price:.5f}, RSI: {rsi:.2f}, ADX: {adx:.2f}.
+        Return ONLY JSON:
+        {{ "signal": "BUY/SELL/WAIT", "conf": 0-100, "reason": "1 sentence" }}
+        """
         response = model.generate_content(prompt)
-        clean_json = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_json)
-    except:
-        return {"signal": "ERROR", "confidence": 0, "reason": "Check API connection."}
+        # Clean the response in case Gemini adds markdown backticks
+        res_text = response.text.replace("```json", "").replace("```", "").strip()
+        return json.loads(res_text)
+    except Exception as e:
+        return {"signal": "ERROR", "conf": 0, "reason": str(e)}
 
 # --- 4. SIDEBAR ---
-st.sidebar.title("🎮 Scalper Settings")
-pair = st.sidebar.selectbox("Currency Pair", ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD"])
-tf = st.sidebar.selectbox("Timeframe", ["1m", "5m", "15m", "1h"], index=0) # Default to 1m
+st.sidebar.header("📊 Market Selector")
+ticker = st.sidebar.selectbox("Pair", ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD"])
+timeframe = st.sidebar.selectbox("Interval", ["1m", "5m", "15m"], index=0)
 
-# --- 5. DATA ENGINE ---
-fetch_p = "1d" if tf == "1m" else "5d"
-data = yf.download(pair, period=fetch_p, interval=tf)
+# --- 5. DATA FETCHING ---
+df = yf.download(ticker, period="1d", interval=timeframe)
 
-if not data.empty:
-    if isinstance(data.columns, pd.MultiIndex):
-        data.columns = data.columns.get_level_values(0)
-
-    data['RSI'] = ta.rsi(data['Close'], length=14)
-    adx_df = ta.adx(data['High'], data['Low'], data['Close'], length=14)
-    data = pd.concat([data, adx_df], axis=1).dropna()
+if not df.empty:
+    # Flatten columns if necessary
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
     
-    if not data.empty:
-        last = data.iloc[-1]
-        
-        # --- UI DISPLAY ---
-        st.title(f"📊 {pair} Live Scalper")
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Live Price", f"{last['Close']:.5f}")
-        col2.metric("RSI (14)", f"{last['RSI']:.1f}")
-        col3.metric("ADX (Trend)", f"{last['ADX_14']:.1f}")
+    # Technical Indicators
+    df['RSI'] = ta.rsi(df['Close'], length=14)
+    adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+    df = pd.concat([df, adx_df], axis=1).dropna()
+    
+    last_row = df.iloc[-1]
+    
+    # --- 6. DASHBOARD UI ---
+    st.title(f"🚀 {ticker} Live Analysis")
+    
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Price", f"{last_row['Close']:.5f}")
+    m2.metric("RSI", f"{last_row['RSI']:.1f}")
+    m3.metric("Trend (ADX)", f"{last_row['ADX_14']:.1f}")
 
-        # --- CHARTING ---
-        fig = go.Figure(data=[go.Candlestick(
-            x=data.index,
-            open=data['Open'], high=data['High'],
-            low=data['Low'], close=data['Close'],
-            name="Candlesticks"
-        )])
-        fig.update_layout(template="plotly_dark", height=400, margin=dict(l=0,r=0,t=0,b=0), xaxis_rangeslider_visible=False)
-        st.plotly_chart(fig, use_container_width=True)
+    # Plot Chart
+    fig = go.Figure(data=[go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'])])
+    fig.update_layout(darkmode=True, height=400, margin=dict(l=10, r=10, b=10, t=10))
+    st.plotly_chart(fig, use_container_width=True)
 
-        # --- AI SIGNAL ---
-        if st.button("🚀 GET AI SIGNAL (GEMINI 2.0)", use_container_width=True):
-            with st.spinner("Gemini 2.0 is reading the market..."):
-                st.session_state.ai_analysis = get_ai_analysis(last['RSI'], last['ADX_14'], last['Close'], pair)
+    # --- 7. THE SIGNAL BUTTON ---
+    st.write("---")
+    if st.button("🎯 GET AI TRADING SIGNAL", use_container_width=True, type="primary"):
+        with st.spinner("Gemini 2.0 is calculating..."):
+            st.session_state.ai_signal = fetch_gemini_signal(
+                last_row['RSI'], last_row['ADX_14'], last_row['Close'], ticker
+            )
 
-        res = st.session_state.ai_analysis
-        st.divider()
+    # Display the Result
+    if st.session_state.ai_signal:
+        sig = st.session_state.ai_signal
+        color = "green" if sig['signal'] == "BUY" else "red" if sig['signal'] == "SELL" else "gray"
         
-        # Signal Styling
-        if res['signal'] == "BUY": st.success(f"### 📈 SIGNAL: {res['signal']} ({res['confidence']}%)")
-        elif res['signal'] == "SELL": st.error(f"### 📉 SIGNAL: {res['signal']} ({res['confidence']}%)")
-        else: st.warning(f"### ⚖️ SIGNAL: {res['signal']} ({res['confidence']}%)")
-        
-        st.info(f"**AI Logic:** {res['reason']}")
+        st.markdown(f"""
+        <div style="padding:20px; border-radius:10px; border: 2px solid {color}; background-color: rgba(0,0,0,0.1)">
+            <h2 style="color:{color}; margin:0;">{sig['signal']} ({sig['conf']}%)</h2>
+            <p style="font-size:1.2rem;"><strong>Reason:</strong> {sig['reason']}</p>
+        </div>
+        """, unsafe_allow_index=True)
+
+else:
+    st.error("Waiting for Market Data...")
