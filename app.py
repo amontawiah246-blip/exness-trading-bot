@@ -7,102 +7,94 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 import json
 
-# --- 1. CONFIG & REFRESH ---
-st.set_page_config(page_title="Exness AI Bot", layout="wide")
-st_autorefresh(interval=60000, key="bot_refresh") # Refresh every 60 seconds
+# --- 1. CONFIG ---
+st.set_page_config(page_title="AI Trading Bot", layout="wide", page_icon="📈")
+st_autorefresh(interval=60000, key="auto_refresh")
 
-# --- 2. API SETUP ---
-# Make sure your API key is in Streamlit Secrets or replace 'YOUR_KEY_HERE'
-API_KEY = st.secrets.get("GEMINI_API_KEY", "YOUR_KEY_HERE")
-genai.configure(api_key=API_KEY)
+# --- 2. API CONNECTION CHECK ---
+st.sidebar.header("🔌 Connection Status")
 
-# Initialize Session State for the signal so it persists during refreshes
-if "ai_signal" not in st.session_state:
-    st.session_state.ai_signal = None
+# Use st.secrets or a manual input for the key
+API_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-# --- 3. HELPER FUNCTIONS ---
-def get_ai_signal(ticker, price, rsi, adx):
+if not API_KEY:
+    st.sidebar.error("❌ Missing API Key")
+    st.sidebar.info("Add GEMINI_API_KEY to your Streamlit Secrets.")
+    conn_ok = False
+else:
     try:
-        model = genai.GenerativeModel('gemini-2.0-flash-exp')
-        prompt = f"""
-        Act as a professional forex scalper.
-        Ticker: {ticker}
-        Current Price: {price:.5f}
-        RSI: {rsi:.2f}
-        ADX: {adx:.2f}
-        
-        Provide a trade signal in JSON format only:
-        {{ "signal": "BUY/SELL/WAIT", "confidence": 0-100, "reason": "short explanation" }}
-        """
-        response = model.generate_content(prompt)
-        # Clean potential markdown from response
-        clean_text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(clean_text)
+        genai.configure(api_key=API_KEY)
+        # Simple test call to verify connection
+        model_test = genai.GenerativeModel('gemini-1.5-flash')
+        st.sidebar.success("✅ Gemini: Connected")
+        conn_ok = True
     except Exception as e:
-        return {"signal": "ERROR", "confidence": 0, "reason": str(e)}
+        st.sidebar.error(f"❌ Connection Failed: {e}")
+        conn_ok = False
 
-# --- 4. SIDEBAR ---
-st.sidebar.header("🕹️ Control Panel")
-ticker = st.sidebar.selectbox("Market", ["EURUSD=X", "GBPUSD=X", "BTC-USD", "USDJPY=X"])
-timeframe = st.sidebar.selectbox("Timeframe", ["1m", "5m", "15m"], index=0)
+# --- 3. SESSION STATE ---
+if "signal_data" not in st.session_state:
+    st.session_state.signal_data = None
 
-# --- 5. DATA FETCHING ---
-df = yf.download(ticker, period="1d", interval=timeframe)
+# --- 4. DATA LOGIC ---
+st.sidebar.divider()
+ticker = st.sidebar.selectbox("Market Asset", ["EURUSD=X", "GBPUSD=X", "BTC-USD", "ETH-USD"])
+timeframe = st.sidebar.selectbox("Timeframe", ["1m", "5m", "15m", "1h"])
+
+@st.cache_data(ttl=60)
+def load_market_data(t, i):
+    data = yf.download(t, period="2d", interval=i)
+    if isinstance(data.columns, pd.MultiIndex):
+        data.columns = data.columns.get_level_values(0)
+    data['RSI'] = ta.rsi(data['Close'], length=14)
+    adx = ta.adx(data['High'], data['Low'], data['Close'])
+    data = pd.concat([data, adx], axis=1)
+    return data.dropna()
+
+# --- 5. MAIN UI ---
+df = load_market_data(ticker, timeframe)
 
 if not df.empty:
-    # Flatten multi-index columns if they exist
-    if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.get_level_values(0)
-
-    # Add Indicators
-    df['RSI'] = ta.rsi(df['Close'], length=14)
-    adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-    df = pd.concat([df, adx_df], axis=1).dropna()
-    
     last_row = df.iloc[-1]
-
-    # --- 6. UI DASHBOARD ---
-    st.title(f"📊 {ticker} Live Scalper")
     
-    m1, m2, m3 = st.columns(3)
-    m1.metric("Price", f"{last_row['Close']:.5f}")
-    m2.metric("RSI", f"{last_row['RSI']:.1f}")
-    m3.metric("Trend (ADX)", f"{last_row['ADX_14']:.1f}")
+    st.title(f"🚀 {ticker} AI Trading Dashboard")
+    
+    # KPIs
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Current Price", f"{last_row['Close']:.5f}")
+    c2.metric("RSI (14)", f"{last_row['RSI']:.1f}")
+    c3.metric("Trend (ADX)", f"{last_row['ADX_14']:.1f}")
 
-    # --- 7. THE CORRECTED CHART ---
+    # Chart
     fig = go.Figure(data=[go.Candlestick(
-        x=df.index,
-        open=df['Open'], high=df['High'],
+        x=df.index, open=df['Open'], high=df['High'],
         low=df['Low'], close=df['Close']
     )])
-
-    # FIX: Use 'template="plotly_dark"' instead of 'darkmode=True'
-    fig.update_layout(
-        template="plotly_dark",
-        height=450,
-        margin=dict(l=10, r=10, b=10, t=10),
-        xaxis_rangeslider_visible=False
-    )
+    fig.update_layout(template="plotly_dark", height=450, margin=dict(l=0, r=0, b=0, t=0))
     st.plotly_chart(fig, use_container_width=True)
 
-    # --- 8. THE SIGNAL BUTTON ---
-    st.write("---")
-    if st.button("🎯 GET AI SIGNAL NOW", use_container_width=True, type="primary"):
-        with st.spinner("Analyzing market patterns..."):
-            st.session_state.ai_signal = get_ai_signal(
-                ticker, last_row['Close'], last_row['RSI'], last_row['ADX_14']
-            )
+    # --- 6. ACTION CENTER (The Button) ---
+    st.markdown("### 🤖 AI Command Center")
+    btn_col, info_col = st.columns([1, 2])
+    
+    with btn_col:
+        if st.button("🎯 GET REAL-TIME SIGNAL", use_container_width=True, type="primary", disabled=not conn_ok):
+            if conn_ok:
+                with st.spinner("Gemini is analyzing price action..."):
+                    try:
+                        ai_model = genai.GenerativeModel('gemini-1.5-flash')
+                        prompt = f"Analyze {ticker} at price {last_row['Close']}. RSI is {last_row['RSI']}. ADX is {last_row['ADX_14']}. Provide a signal (BUY/SELL/WAIT) and a 1-sentence reason in JSON format: {{'signal': '...', 'reason': '...'}}"
+                        response = ai_model.generate_content(prompt)
+                        # Extract JSON
+                        raw_text = response.text.strip().replace("```json", "").replace("```", "")
+                        st.session_state.signal_data = json.loads(raw_text)
+                    except Exception as e:
+                        st.error(f"AI Error: {e}")
 
-    # Display results if they exist
-    if st.session_state.ai_signal:
-        res = st.session_state.ai_signal
-        color = "green" if res['signal'] == "BUY" else "red" if res['signal'] == "SELL" else "orange"
-        
-        st.markdown(f"""
-            <div style="border: 2px solid {color}; padding: 15px; border-radius: 10px; background-color: rgba(0,0,0,0.2);">
-                <h3 style="color:{color}; margin-top:0;">{res['signal']} Signal ({res['confidence']}%)</h3>
-                <p><strong>Reasoning:</strong> {res['reason']}</p>
-            </div>
-        """, unsafe_allow_html=True)
+    # Display results
+    if st.session_state.signal_data:
+        res = st.session_state.signal_data
+        st.info(f"**SIGNAL:** {res['signal']} | **WHY:** {res['reason']}")
+
 else:
-    st.error("Connection error. Could not fetch market data.")
+    st.warning("Waiting for market data... check your internet or ticker symbol.")
