@@ -3,6 +3,4 @@ yfinance
 pandas
 pandas_ta
 plotly
-google-generativeai
 streamlit-autorefresh
-scipy
